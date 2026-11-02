@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><meta name="referrer" content="no-referrer">
+<title>Estoy Bien · Alerta</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root{--bg:#fff;--fg:#111;--muted:#555;--danger:#b00020;--card:#f3f4f6;--ok:#0a6b2d}
+  @media (prefers-color-scheme:dark){:root{--bg:#0d0d0d;--fg:#f5f5f5;--muted:#bbb;--danger:#ff5c6c;--card:#1c1c1c;--ok:#3ecf73}}
+  body{margin:0;background:var(--bg);color:var(--fg);font:19px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  main{max-width:720px;margin:0 auto;padding:16px}
+  .banner{background:var(--danger);color:#fff;border-radius:16px;padding:16px 18px;margin:8px 0 16px}
+  .banner.ok{background:var(--ok)}
+  .banner h1{margin:0;font-size:26px;line-height:1.25}
+  #map{height:360px;border-radius:16px;margin:12px 0;background:var(--card)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .card{background:var(--card);border-radius:14px;padding:14px}
+  .card b{display:block;font-size:15px;color:var(--muted);font-weight:600}
+  .calls{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}
+  .calls a{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:72px;border-radius:14px;
+           background:var(--danger);color:#fff;text-decoration:none;font-weight:800;font-size:24px}
+  .calls a span{font-size:13px;font-weight:600}
+  a.btn{display:block;text-align:center;padding:16px;border-radius:14px;border:2px solid currentColor;color:inherit;text-decoration:none;font-weight:700;margin:10px 0}
+  small{color:var(--muted)} .warn{font-weight:700}
+  @media (max-width:420px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body><main id="app"><p>Cargando…</p></main>
+<script src="../config.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const T = {
+  es: { inactivity: n => `${n} no responde su teléfono`, panic: n => `${n} activó su botón de pánico`,
+        duress: n => `${n} podría estar en peligro (alerta silenciosa)`, pin_bruteforce: n => `Intentos sospechosos en el teléfono de ${n}`,
+        duressWarn: 'NO le llames ni le escribas: podría estar siendo obligado/a a usar su teléfono. Contacta a Carabineros (133).',
+        since: 'Última actividad', at: 'Alerta enviada', battery: 'Batería', loc: 'Última ubicación', acc: 'precisión',
+        open: 'Abrir en Google Maps', medical: 'Información médica', blood: 'Tipo de sangre', allergies: 'Alergias',
+        meds: 'Medicamentos', cond: 'Condición', notes: 'Notas', msg: 'Mensaje', call: 'Llamar a', live: 'Se actualiza automáticamente',
+        cancelled: n => `${n} confirmó que está bien`, invalid: 'Enlace no válido.', noLoc: 'Sin ubicación disponible',
+        disclaimer: 'Estoy Bien no reemplaza a los servicios de emergencia. Si crees que hay peligro, llama ahora.' },
+  en: { inactivity: n => `${n} is not responding`, panic: n => `${n} pressed their panic button`,
+        duress: n => `${n} may be in danger (silent alert)`, pin_bruteforce: n => `Suspicious attempts on ${n}'s phone`,
+        duressWarn: 'DO NOT call or text them: they may be forced to use their phone. Contact the police (133 in Chile).',
+        since: 'Last activity', at: 'Alert sent', battery: 'Battery', loc: 'Last location', acc: 'accuracy',
+        open: 'Open in Google Maps', medical: 'Medical information', blood: 'Blood type', allergies: 'Allergies',
+        meds: 'Medication', cond: 'Condition', notes: 'Notes', msg: 'Message', call: 'Call', live: 'Updates automatically',
+        cancelled: n => `${n} confirmed they are OK`, invalid: 'Invalid link.', noLoc: 'No location available',
+        disclaimer: 'Estoy Bien does not replace emergency services. If you think there is danger, call now.' },
+};
+const token = location.hash.slice(1);
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let map, layer;
+
+async function load() {
+  const r = await fetch(ESTOYBIEN.apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: ESTOYBIEN.anonKey },
+    body: JSON.stringify({ action: 'alert_view', token }) }).catch(() => null);
+  const d = r && r.ok ? await r.json() : null;
+  const t = T[(d && d.locale) || 'es'];
+  if (!d) { app.innerHTML = `<h1>${t.invalid}</h1>`; return; }
+  const name = esc(d.user_name || '—');
+  if (d.status === 'cancelled') {
+    app.innerHTML = `<div class="banner ok"><h1>✅ ${t.cancelled(name)}</h1></div>`; return;
+  }
+  const fmt = iso => iso ? new Intl.DateTimeFormat(d.locale === 'en' ? 'en-GB' : 'es-CL',
+      { timeZone: d.timezone, dateStyle: 'short', timeStyle: 'short' }).format(new Date(iso)) : '—';
+  const kind = d.duress ? 'duress' : d.kind;
+  const last = (d.locations || [])[0];
+  const m = d.medical || {};
+  const med = [['blood_type', t.blood], ['allergies', t.allergies], ['medications', t.meds], ['conditions', t.cond], ['notes', t.notes]]
+    .filter(([k]) => m[k]).map(([k, l]) => `<p><b>${l}:</b> ${esc(m[k])}</p>`).join('');
+
+  if (!map) {
+    app.innerHTML = `
+      <div class="banner"><h1>🚨 ${(T[d.locale] || T.es)[kind](name)}</h1>${d.duress ? `<p class="warn">${t.duressWarn}</p>` : ''}</div>
+      <div class="calls">
+        <a href="tel:133">133<span>Carabineros</span></a><a href="tel:131">131<span>SAMU</span></a><a href="tel:132">132<span>Bomberos</span></a>
+      </div>
+      <div id="map"></div><div id="details"></div>
+      <small>${t.disclaimer}${d.live ? ' · ' + t.live : ''}</small>`;
+    map = L.map('map', { zoomControl: true });
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+    layer = L.layerGroup().addTo(map);
+    map.setView([-33.45, -70.66], 11);
+  }
+  layer.clearLayers();
+  const pts = (d.locations || []).map(p => [p.lat, p.lng]);
+  if (pts.length) {
+    if (pts.length > 1) L.polyline(pts, { weight: 4 }).addTo(layer);
+    L.circle(pts[0], { radius: Math.max(last.acc || 20, 20) }).addTo(layer);
+    L.marker(pts[0]).addTo(layer).bindPopup(`${name} · ${fmt(last.at)}`);
+    map.setView(pts[0], 16);
+  }
+  document.getElementById('details').innerHTML = `
+    <div class="grid">
+      <div class="card"><b>${t.since}</b>${fmt(d.last_activity_at)}</div>
+      <div class="card"><b>${t.at}</b>${fmt(d.triggered_at)}</div>
+      <div class="card"><b>${t.loc}</b>${last ? `${fmt(last.at)} · ${t.acc} ±${Math.round(last.acc || 0)} m` : t.noLoc}</div>
+      <div class="card"><b>${t.battery}</b>${d.battery ?? last?.battery ?? '—'}%</div>
+    </div>
+    ${last ? `<a class="btn" href="https://maps.google.com/?q=${last.lat},${last.lng}">${t.open}</a>` : ''}
+    ${!d.duress && d.user_phone ? `<a class="btn" href="tel:${esc(d.user_phone)}">${t.call} ${name}</a>` : ''}
+    ${d.custom_message ? `<div class="card"><b>${t.msg}</b>${esc(d.custom_message)}</div>` : ''}
+    ${med ? `<div class="card" style="margin-top:10px"><b>${t.medical}</b>${med}</div>` : ''}`;
+  if (d.live) setTimeout(load, 60_000);
+}
+load();
+</script>
+</body></html>
